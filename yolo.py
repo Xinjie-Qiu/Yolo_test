@@ -52,6 +52,7 @@ class Yolo:
         self.loaddata()
         # self.argv_parser(argvs)
         self.training()
+        self.testing()
 
     def argv_parser(self, argvs):
         for i in range(1, len(argvs), 2):
@@ -107,7 +108,6 @@ class Yolo:
         fc_1 = tf.nn.leaky_relu(tf.layers.dense(temp_conv_flat, 4096), alpha=0.1)
         fc_1 = tf.nn.dropout(fc_1, keep_prob=0.5)
         fc_2 = tf.layers.dense(fc_1, self.grid_size * self.grid_size * (self.num_class + 5 * self.num_box))
-        fc_2 = tf.reshape(fc_2, [self.batch_size, self.grid_size, self.grid_size, self.num_class + 5 * self.num_box])
         return fc_2
 
     def detect_from_cvmat(self, img):
@@ -384,7 +384,8 @@ class Yolo:
         self.labels = tf.placeholder(tf.float32, (self.batch_size, self.max_objects, 5))
         self.objects_num = tf.placeholder(tf.int32, (self.batch_size))
         self.predicts =  self.build_networks(self.images)
-        self.total_loss, self.nilboy = self.loss(self.predicts, self.labels, self.objects_num)
+        self.total_loss, self.nilboy = self.loss(tf.reshape(self.predicts, [-1, self.grid_size, self.grid_size, self.num_class + 5 * self.num_box])
+                                                 , self.labels, self.objects_num)
         self.train_op = tf.train.AdamOptimizer(self.learning_rate).minimize(self.total_loss)
         config = tf.ConfigProto(log_device_placement=True, allow_soft_placement = True)
         config.gpu_options.allow_growth = True
@@ -398,6 +399,14 @@ class Yolo:
                                              {self.images: np_images, self.labels: np_labels,
                                                         self.objects_num: np_objects_num})
         return None
+
+    def testing(self):
+        np_image, _, _ = self.batch()
+        result = self.sess.run(self.predicts, {self.images: np_image})
+        self.result = self.interpret_output(result[0])
+        self.show_results(np_image[0], self.result)
+
+
 
     def iou(self, boxes1, boxes2):
         """calculate ious
