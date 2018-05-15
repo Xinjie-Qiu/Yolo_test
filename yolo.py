@@ -26,7 +26,7 @@ class Yolo:
     classes = ["aeroplane", "bicycle", "bird", "boat", "bottle", "bus", "car", "cat", "chair", "cow", "diningtable",
                "dog", "horse", "motorbike", "person", "pottedplant", "sheep", "sofa", "train", "tvmonitor"]
     data_path = 'data/pascal_voc.txt'
-    batch_size = 16
+    batch_size = 4
 
     thread_num = 5
     max_objects = 20
@@ -43,7 +43,9 @@ class Yolo:
     coord_scale = 5
 
     learning_rate = 1e-6
-    max_iterators = 100
+    max_iterators = 10000
+
+    log = '/home/eeb02/PycharmProjects/Yolo_test/model/mymodel.ckpt'
 
     def __init__(self, argvs=[]):
         # record and image_label queue
@@ -51,7 +53,8 @@ class Yolo:
         self.image_label_queue = Queue(maxsize=512)
         self.loaddata()
         # self.argv_parser(argvs)
-        self.training()
+        with tf.device('/gpu:1'):
+            self.training()
         self.testing()
 
     def argv_parser(self, argvs):
@@ -283,6 +286,9 @@ class Yolo:
         """
         image = cv2.imread(record[0])
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        cv2.imshow('image', image)
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
         h = image.shape[0]
         w = image.shape[1]
 
@@ -383,21 +389,24 @@ class Yolo:
         self.images = tf.placeholder(tf.float32, (self.batch_size, self.h_img, self.w_img, 3))
         self.labels = tf.placeholder(tf.float32, (self.batch_size, self.max_objects, 5))
         self.objects_num = tf.placeholder(tf.int32, (self.batch_size))
-        self.predicts =  self.build_networks(self.images)
-        self.total_loss, self.nilboy = self.loss(tf.reshape(self.predicts, [-1, self.grid_size, self.grid_size, self.num_class + 5 * self.num_box])
-                                                 , self.labels, self.objects_num)
+        self.predicts = self.build_networks(self.images)
+        self.total_loss, self.nilboy = self.loss(
+            tf.reshape(self.predicts, [-1, self.grid_size, self.grid_size, self.num_class + 5 * self.num_box])
+            , self.labels, self.objects_num)
         self.train_op = tf.train.AdamOptimizer(self.learning_rate).minimize(self.total_loss)
-        config = tf.ConfigProto(log_device_placement=True, allow_soft_placement = True)
+        config = tf.ConfigProto(log_device_placement=True, allow_soft_placement=True)
         config.gpu_options.allow_growth = True
         self.sess = tf.Session(config=config)
         self.init_op = tf.global_variables_initializer()
         self.sess.run(self.init_op)
+        saver = tf.train.Saver()
         # tf.summary.scalar('loss', self.total_loss)
         for step in range(self.max_iterators):
             np_images, np_labels, np_objects_num = self.batch()
             _, loss_value, nilboy = self.sess.run([self.train_op, self.total_loss, self.nilboy],
-                                             {self.images: np_images, self.labels: np_labels,
-                                                        self.objects_num: np_objects_num})
+                                                  {self.images: np_images, self.labels: np_labels,
+                                                   self.objects_num: np_objects_num})
+        saver.save(self.sess, self.log)
         return None
 
     def testing(self):
@@ -405,8 +414,6 @@ class Yolo:
         result = self.sess.run(self.predicts, {self.images: np_image})
         self.result = self.interpret_output(result[0])
         self.show_results(np_image[0], self.result)
-
-
 
     def iou(self, boxes1, boxes2):
         """calculate ious
@@ -417,10 +424,10 @@ class Yolo:
           iou: 3-D tensor [CELL_SIZE, CELL_SIZE, BOXES_PER_CELL]
         """
         boxes1 = tf.stack([boxes1[:, :, :, 0] - boxes1[:, :, :, 2] / 2, boxes1[:, :, :, 1] - boxes1[:, :, :, 3] / 2,
-                          boxes1[:, :, :, 0] + boxes1[:, :, :, 2] / 2, boxes1[:, :, :, 1] + boxes1[:, :, :, 3] / 2])
+                           boxes1[:, :, :, 0] + boxes1[:, :, :, 2] / 2, boxes1[:, :, :, 1] + boxes1[:, :, :, 3] / 2])
         boxes1 = tf.transpose(boxes1, [1, 2, 3, 0])
         boxes2 = tf.stack([boxes2[0] - boxes2[2] / 2, boxes2[1] - boxes2[3] / 2,
-                          boxes2[0] + boxes2[2] / 2, boxes2[1] + boxes2[3] / 2])
+                           boxes2[0] + boxes2[2] / 2, boxes2[1] + boxes2[3] / 2])
 
         # calculate the left up point
         lu = tf.maximum(boxes1[:, :, :, 0:2], boxes2[0:2])
@@ -615,6 +622,7 @@ class Yolo:
         #         loss[0] + loss[1] + loss[2] + loss[3]) / self.batch_size)
 
         return tf.add_n(tf.get_collection('losses'), name='total_loss'), nilboy
+
 
 def main(argvs):
     yolo = Yolo(argvs)
