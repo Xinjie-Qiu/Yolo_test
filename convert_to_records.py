@@ -17,6 +17,7 @@ classes_num = {'aeroplane': 0, 'bicycle': 1, 'bird': 2, 'boat': 3, 'bottle': 4, 
     'horse': 12, 'motorbike': 13, 'person': 14, 'pottedplant': 15, 'sheep': 16,
     'sofa': 17, 'train': 18, 'tvmonitor': 19}
 
+max_objects = 20
 
 def _int64_feature(value):
     if not isinstance(value, list):
@@ -58,6 +59,8 @@ def create_example(xml_file):
         ymax.append(float(objects[4][3].text) * h_img / height)
         classes.append(classes_num[objects[0].text])
         object_number += 1
+        if object_number >= max_objects:
+            break
     image_path = os.path.join('/data/pascal/VOCdevkit/VOC2007/JPEGImages', '{}'.format(filename))
     image = cv2.imread(image_path)
     # image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)

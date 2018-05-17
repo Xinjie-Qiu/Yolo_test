@@ -1,7 +1,7 @@
 import tensorflow as tf
 import sys
 import numpy as np
-import cv2
+import datetime
 
 datadir = '/data/pascal/train.tfrecords'
 
@@ -58,8 +58,9 @@ def getfeature(dir):
     classes = tf.sparse_tensor_to_dense(tf.sparse_reset_shape(classes, [20]))
     label = tf.transpose([xmin, ymin, xmax, ymax, classes], [1, 0])
 
-    return tf.train.shuffle_batch([image, label, object_number], batch_size, batch_size * 3 + 200, 200,
-                                  num_preprocess_threads, shapes=[[448, 448, 3], [20, 5], []])
+    # return tf.train.shuffle_batch([image, label, object_number], batch_size, batch_size * 3 + 200, 200,
+    #                               num_preprocess_threads, shapes=[[448, 448, 3], [20, 5], []])
+    return tf.train.batch([image, label, object_number], batch_size, num_preprocess_threads, shapes=[[448, 448, 3], [20, 5], []])
 
 
 def build_network(image):
@@ -124,8 +125,8 @@ def body1(num, predict, labels, object_number, loss):
     label_class = tf.reshape(label_class, [cell_size, cell_size, 1])
 
     # this cell is object's center or not
-    y_center = ((label[3] + label[1]) / 2.0) / (h_img / cell_size)
-    x_center = ((label[2] + label[0]) / 2.0) / (w_img / cell_size)
+    y_center = ((label[3] + label[1]) / 2.0) / (h_img / cell_size) + 1e-6
+    x_center = ((label[2] + label[0]) / 2.0) / (w_img / cell_size) + 1e-6
     h = (label[2] - label[0]) / (h_img / cell_size)
     w = (label[3] - label[1]) / (w_img / cell_size)
 
@@ -160,8 +161,8 @@ def body1(num, predict, labels, object_number, loss):
     coord_loss = (
                          tf.nn.l2_loss((predict_boxes[:, :, :, 0] - x_center) * I)
                          + tf.nn.l2_loss((predict_boxes[:, :, :, 1] - y_center) * I)
-                         + tf.nn.l2_loss((tf.sqrt(predict_boxes[:, :, :, 2]) - tf.sqrt(w)) * I)
-                         + tf.nn.l2_loss((tf.sqrt(predict_boxes[:, :, :, 3]) - tf.sqrt(h)) * I)
+                         + tf.nn.l2_loss((predict_boxes[:, :, :, 2] - w) * I)
+                         + tf.nn.l2_loss((predict_boxes[:, :, :, 3] - h) * I)
                  ) * coord_scale
 
     return num + 1, predict, labels, object_number, [loss[0] + class_loss, loss[1] + object_loss,
@@ -197,19 +198,7 @@ def iou(predicts, label):
     return inter_squrt / (squrt_1 + squrt_2 - inter_squrt + 1e-6)
 
 
-def main(argvs):
-    # with tf.device('/gpu:1'):
-    image, labels, objects_number = getfeature(datadir)
-    batch_queue = tf.contrib.slim.prefetch_queue.prefetch_queue(
-        [image, labels], capacity=2 * num_gpus)
-    opt = tf.train.AdamOptimizer(0.001)
-    tower_grad = []
-    # with tf.variable_scope(tf.get_variable_scope()):
-    #     for i in range(2):
-    #         with tf.device('/gpu:%d' % i):
-    image_batch, label_batch = batch_queue.dequeue()
-    predicts = build_network(image_batch)
-
+def loss(predicts, labels, objects_number):
     class_loss = tf.constant(0, tf.float32)
     object_loss = tf.constant(0, tf.float32)
     noobject_loss = tf.constant(0, tf.float32)
@@ -218,34 +207,59 @@ def main(argvs):
 
     for j in range(batch_size):
         predict = predicts[j, :, :, :]
-        label = label_batch[j, :, :]
+        label = labels[j, :, :]
         object_number = objects_number[j]
         object_number = tf.cast(object_number, tf.int32)
-        num = 0
 
         tuple_result = tf.while_loop(cond1, body1, [tf.constant(0), predict, label, object_number,
                                                     [class_loss, object_loss, noobject_loss, coord_loss]])
         for k in range(4):
             loss[k] += tuple_result[4][k]
-        total_loss = tf.add_n(loss)
-        # grad = opt.compute_gradients(total_loss)
-        tower_grad.append(total_loss)
+    losses = tf.add_n(loss) / batch_size
 
-    # apply_op = opt.apply_gradients(tower_grad[0])
+    return losses
+
+
+def main(argvs):
+
     config = tf.ConfigProto()
     config.gpu_options.allow_growth = True
     sess = tf.Session(config=config)
 
+    image, labels, objects_number = getfeature(datadir)
+
     coord = tf.train.Coordinator()
     threads = tf.train.start_queue_runners(sess=sess, coord=coord)
-    init = [tf.local_variables_initializer(), tf.global_variables_initializer()]
-    sess.run(init)
+
+    opt = tf.train.GradientDescentOptimizer(0.001)
+    tower_gradient = []
+
+    predicts = build_network(image)
+    total_loss = loss(predicts, labels, objects_number)
+    gradient = opt.compute_gradients(total_loss)
+    tower_gradient.append(gradient)
+    apply_op = opt.apply_gradients(tower_gradient[0])
+
+    saver = tf.train.Saver()
+    init_op = tf.group(tf.global_variables_initializer(), tf.local_variables_initializer())
+    sess.run(init_op)
+
+    tf.summary.scalar('loss', total_loss)
+    merged = tf.summary.merge_all()
+    logdir = "tensorboard/" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S") + "/"
+
+    writer = tf.summary.FileWriter(logdir, sess.graph)
 
     print('complete')
 
-    test = sess.run(predicts)
-    test_1 = sess.run(tower_grad)
+    for i in range(100000):
+        sess.run(apply_op)
+        if i % 100 == 0:
+            summmary, losses = sess.run([merged, total_loss])
+            writer.add_summary(summmary)
+            print('step {}, loss = {}'.format(i, losses))
 
+    saver.save(sess, './model/mymodel.ckpt')
     print('yea')
     coord.request_stop()
     coord.join(threads)
@@ -253,3 +267,4 @@ def main(argvs):
 
 if __name__ == '__main__':
     main(sys.argv)
+
