@@ -25,9 +25,9 @@ object_scale = 1
 noobject_scale = 0.5
 class_scale = 1
 
-learning_rate = 0.0001
-momentum = 0.9
-max_iterators = 1000000
+initial_learning_rate = 0.0001
+decay_steps = 30000
+decay_rate = 0.1
 
 
 def getfeature(dir):
@@ -64,8 +64,7 @@ def getfeature(dir):
 
     # return tf.train.shuffle_batch([image, label, object_number], batch_size, batch_size * 3 + 200, 200,
     #                               num_preprocess_threads, shapes=[[448, 448, 3], [20, 5], []])
-    return tf.train.batch([image, label, object_number], batch_size, num_preprocess_threads,
-                          shapes=[[448, 448, 3], [20, 5], []])
+    return tf.train.batch([image, label, object_number], batch_size, num_preprocess_threads, shapes=[[448, 448, 3], [20, 5], []])
 
 
 def build_network(image):
@@ -236,38 +235,59 @@ def main(argvs):
         coord = tf.train.Coordinator()
         threads = tf.train.start_queue_runners(sess=sess, coord=coord)
 
-        opt = tf.train.MomentumOptimizer(learning_rate, momentum)
+        global_step = tf.train.create_global_step()
+        lr = tf.train.exponential_decay(initial_learning_rate, global_step, decay_steps, decay_rate, staircase=True)
+        opt = tf.train.GradientDescentOptimizer(lr)
         tower_gradient = []
         with tf.device('/gpu:1'):
             predicts = build_network(image)
-            total_loss = loss(predicts, labels, objects_number)
-            gradient = opt.compute_gradients(total_loss)
-            tower_gradient.append([gradient, total_loss])
-        apply_op = opt.apply_gradients(tower_gradient[0][0])
-        saver = tf.train.Saver()
+            tower_gradient.append(predicts)
+
         init_op = tf.group(tf.global_variables_initializer(), tf.local_variables_initializer())
         sess.run(init_op)
+        test = sess.run(tower_gradient)
+        print('test')
 
-        tf.summary.scalar('loss', tower_gradient[0][1])
-        merged = tf.summary.merge_all()
-        logdir = "tensorboard/" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S") + "/"
+        loss_test = []
+        with tf.device('/gpu:0'):
+            total_loss = loss(tower_gradient[0], labels, objects_number)
+            loss_test.append(total_loss)
 
-        writer = tf.summary.FileWriter(logdir, sess.graph)
+        init_op = tf.group(tf.global_variables_initializer(), tf.local_variables_initializer())
+        sess.run(init_op)
+        test = sess.run(loss_test)
 
-        print('complete')
+    predicts = build_network(image)
+    total_loss = loss(predicts, labels, objects_number)
+    gradient = opt.compute_gradients(total_loss)
+    tower_gradient.append(gradient)
+    apply_op = opt.apply_gradients(tower_gradient[0])
 
-        for i in range(max_iterators):
-            sess.run(apply_op)
-            if i % 100 == 0:
-                summmary, losses = sess.run([merged, total_loss])
-                writer.add_summary(summmary, global_step=i)
-                print('step {}, loss = {}'.format(i, losses))
+    saver = tf.train.Saver()
+    init_op = tf.group(tf.global_variables_initializer(), tf.local_variables_initializer())
+    sess.run(init_op)
 
-        saver.save(sess, './model/mymodel.ckpt')
-        print('yea')
-        coord.request_stop()
-        coord.join(threads)
+    tf.summary.scalar('loss', total_loss)
+    merged = tf.summary.merge_all()
+    logdir = "tensorboard/" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S") + "/"
+
+    writer = tf.summary.FileWriter(logdir, sess.graph)
+
+    print('complete')
+
+    for i in range(100000):
+        sess.run(apply_op)
+        if i % 100 == 0:
+            summmary, losses = sess.run([merged, total_loss])
+            writer.add_summary(summmary)
+            print('step {}, loss = {}'.format(i, losses))
+
+    # saver.save(sess, './model/mymodel.ckpt')
+    print('yea')
+    coord.request_stop()
+    coord.join(threads)
 
 
 if __name__ == '__main__':
     main(sys.argv)
+
