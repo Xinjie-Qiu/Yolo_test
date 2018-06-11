@@ -3,13 +3,13 @@ import sys
 import numpy as np
 import datetime
 
-datadir = '/data/pascal/train.tfrecords'
+datadir = '/data/pascal/val.tfrecords'
 
 w_img = 448
 h_img = 448
 d_img = 3
 
-batch_size = 16
+batch_size = 1
 num_preprocess_threads = 8
 min_queue_examples = 2000
 
@@ -27,12 +27,12 @@ class_scale = 1
 
 learning_rate = 0.0001
 momentum = 0.9
-max_iterators = 1000000
+max_iterators = 3000
 
 
 def getfeature(dir):
     reader = tf.TFRecordReader()
-    filename_queue = tf.train.string_input_producer([dir])
+    filename_queue = tf.train.string_input_producer([dir], capacity=4 * batch_size)
     _, serialized_example = reader.read(filename_queue)
     features = tf.parse_single_example(
         serialized_example,
@@ -64,7 +64,7 @@ def getfeature(dir):
 
     # return tf.train.shuffle_batch([image, label, object_number], batch_size, batch_size * 3 + 200, 200,
     #                               num_preprocess_threads, shapes=[[448, 448, 3], [20, 5], []])
-    return tf.train.batch([image, label, object_number], batch_size, num_preprocess_threads,
+    return tf.train.shuffle_batch([image, label, object_number], batch_size, 4 * batch_size, 1 * batch_size, num_preprocess_threads,
                           shapes=[[448, 448, 3], [20, 5], []])
 
 
@@ -132,8 +132,9 @@ def body1(num, predict, labels, object_number, loss):
     # this cell is object's center or not
     y_center = ((label[3] + label[1]) / 2.0) / (h_img / cell_size) + 1e-6
     x_center = ((label[2] + label[0]) / 2.0) / (w_img / cell_size) + 1e-6
-    h = (label[2] - label[0]) / (h_img / cell_size)
-    w = (label[3] - label[1]) / (w_img / cell_size)
+    h = (label[3] - label[1]) / (w_img / cell_size)
+    w = (label[2] - label[0]) / (h_img / cell_size)
+
 
     label_object = tf.ones([1, 1])
     temp = [[tf.floor(y_center), cell_size - tf.ceil(y_center)],
@@ -155,21 +156,22 @@ def body1(num, predict, labels, object_number, loss):
             base_boxes[i, j, :, 1] += i
     predict_boxes = (base_boxes + predict_boxes)
 
-    iou_truth = iou(predict_boxes, label[:4])
+    iou_truth = iou(predict_boxes, [x_min, y_min, x_max, y_max])
     max_iou = tf.reduce_max(iou_truth, 2, keep_dims=True)
     I = tf.cast(iou_truth >= max_iou, tf.float32) * label_object
     no_I = tf.ones_like(I) - I
 
-    object_loss = tf.nn.l2_loss(I * (predict[:, :, 4 * num_box:4 * num_box + num_box] - iou_truth) * object_scale)
-    noobject_loss = tf.nn.l2_loss(no_I * predict[:, :, 4 * num_box:4 * num_box + num_box] * noobject_scale)
-
+    object_loss = tf.nn.l2_loss(I * (predict[:, :, 4 * num_box:4 * num_box + num_box] - iou_truth)) * object_scale
+    noobject_loss = tf.nn.l2_loss(no_I * predict[:, :, 4 * num_box:4 * num_box + num_box]) * noobject_scale
+    # object_loss = tf.constant(0, tf.float32)
+    # noobject_loss = tf.constant(0, tf.float32)
     coord_loss = (
                          tf.nn.l2_loss((predict_boxes[:, :, :, 0] - x_center) * I)
                          + tf.nn.l2_loss((predict_boxes[:, :, :, 1] - y_center) * I)
                          + tf.nn.l2_loss((predict_boxes[:, :, :, 2] - w) * I)
                          + tf.nn.l2_loss((predict_boxes[:, :, :, 3] - h) * I)
                  ) * coord_scale
-
+    # coord_loss = tf.constant(0, tf.float32)
     return num + 1, predict, labels, object_number, [loss[0] + class_loss, loss[1] + object_loss,
                                                      loss[2] + noobject_loss, loss[3] + coord_loss]
 
@@ -220,13 +222,17 @@ def loss(predicts, labels, objects_number):
                                                     [class_loss, object_loss, noobject_loss, coord_loss]])
         for k in range(4):
             loss[k] += tuple_result[4][k]
+    tf.summary.scalar('class_loss', loss[0] / batch_size)
+    tf.summary.scalar('object_loss', loss[1] / batch_size)
+    tf.summary.scalar('noobject_loss', loss[2] / batch_size)
+    tf.summary.scalar('coord_loss', loss[3] / batch_size)
     losses = tf.add_n(loss) / batch_size
 
     return losses
 
 
 def main(argvs):
-    with tf.device('/cpu:0'):
+    with tf.device('/cpu'):
         config = tf.ConfigProto(allow_soft_placement=True)
         config.gpu_options.allow_growth = True
         sess = tf.Session(config=config)
@@ -242,13 +248,14 @@ def main(argvs):
             predicts = build_network(image)
             total_loss = loss(predicts, labels, objects_number)
             gradient = opt.compute_gradients(total_loss)
-            tower_gradient.append([gradient, total_loss])
-        apply_op = opt.apply_gradients(tower_gradient[0][0])
+            tower_gradient.append(gradient)
+        apply_op = opt.apply_gradients(tower_gradient[0])
         saver = tf.train.Saver()
         init_op = tf.group(tf.global_variables_initializer(), tf.local_variables_initializer())
         sess.run(init_op)
+        # saver.restore(sess, './model_test/mymodel.ckpt')
 
-        tf.summary.scalar('loss', tower_gradient[0][1])
+        tf.summary.scalar('loss', total_loss)
         merged = tf.summary.merge_all()
         logdir = "tensorboard/" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S") + "/"
 
@@ -263,7 +270,7 @@ def main(argvs):
                 writer.add_summary(summmary, global_step=i)
                 print('step {}, loss = {}'.format(i, losses))
 
-        saver.save(sess, './model/mymodel.ckpt')
+        saver.save(sess, './model_test/mymodel.ckpt')
         print('yea')
         coord.request_stop()
         coord.join(threads)

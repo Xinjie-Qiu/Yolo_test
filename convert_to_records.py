@@ -88,6 +88,7 @@ def create_example(xml_file):
 def main():
     writer_train = tf.python_io.TFRecordWriter('/data/pascal/train.tfrecords')
     writer_test = tf.python_io.TFRecordWriter('/data/pascal/test.tfrecords')
+    # writer_val = tf.python_io.TFRecordWriter('/data/pascal/val.tfrecords')
     filename_list = tf.train.match_filenames_once("/data/pascal/VOCdevkit/VOC2007/Annotations/*.xml")
     config = tf.ConfigProto()
     config.gpu_options.allow_growth = True
@@ -108,11 +109,15 @@ def main():
             else:
                 writer_train.write(example.SerializeToString())
                 trn += 1
+            # writer_val.write(example.SerializeToString())
+            #
+            # break
             i += 1
         except Exception:
             pass
     writer_test.close()
     writer_train.close()
+    # writer_val.close()
     print('Successfully convert tfrecord')
     print('train dataset: # ')
     print(trn)
